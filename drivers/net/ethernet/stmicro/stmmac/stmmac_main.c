@@ -2469,7 +2469,8 @@ static bool stmmac_xdp_xmit_zc(struct stmmac_priv *priv, u32 queue, u32 budget)
  * @queue: TX queue index
  * Description: it reclaims the transmit resources after transmission completes.
  */
-static int stmmac_tx_clean(struct stmmac_priv *priv, int budget, u32 queue)
+static int stmmac_tx_clean(struct stmmac_priv *priv, int budget, u32 queue, bool *pending_packets)
+//static int stmmac_tx_clean(struct stmmac_priv *priv, int budget, u32 queue)
 {
 	struct stmmac_tx_queue *tx_q = &priv->tx_queue[queue];
 	unsigned int bytes_compl = 0, pkts_compl = 0;
@@ -2630,9 +2631,10 @@ static int stmmac_tx_clean(struct stmmac_priv *priv, int budget, u32 queue)
 
 	/* We still have pending packets, let's call for a new scheduling */
 	if (tx_q->dirty_tx != tx_q->cur_tx)
-		hrtimer_start(&tx_q->txtimer,
-			      STMMAC_COAL_TIMER(priv->tx_coal_timer[queue]),
-			      HRTIMER_MODE_REL);
+		*pending_packets=true; //psakhis
+//		hrtimer_start(&tx_q->txtimer,
+//			      STMMAC_COAL_TIMER(priv->tx_coal_timer[queue]),
+//			      HRTIMER_MODE_REL);
 
 	__netif_tx_unlock_bh(netdev_get_tx_queue(priv->dev, queue));
 
@@ -5219,8 +5221,8 @@ read_again:
 		}
 
 		if (!skb) {
-			unsigned int pre_len, sync_len;
-
+			
+			unsigned int pre_len, sync_len;			
 			dma_sync_single_for_cpu(priv->device, buf->addr,
 						buf1_len, dma_dir);
 
@@ -5264,7 +5266,7 @@ read_again:
 					xdp_status |= xdp_res;
 					buf->page = NULL;
 					skb = NULL;
-					count++;
+					count++;					
 					continue;
 				}
 			}
@@ -5277,7 +5279,7 @@ read_again:
 			skb = napi_alloc_skb(&ch->rx_napi, buf1_len);
 			if (!skb) {
 				priv->dev->stats.rx_dropped++;
-				count++;
+				count++;				
 				goto drain_data;
 			}
 
@@ -5386,11 +5388,13 @@ static int stmmac_napi_poll_tx(struct napi_struct *napi, int budget)
 		container_of(napi, struct stmmac_channel, tx_napi);
 	struct stmmac_priv *priv = ch->priv_data;
 	u32 chan = ch->index;
+	bool pending_packets = false;
 	int work_done;
 
 	priv->xstats.napi_poll++;
 
-	work_done = stmmac_tx_clean(priv, budget, chan);
+	work_done = stmmac_tx_clean(priv, budget, chan, &pending_packets);
+	//work_done = stmmac_tx_clean(priv, budget, chan);
 	work_done = min(work_done, budget);
 
 	if (work_done < budget && napi_complete_done(napi, work_done)) {
@@ -5401,6 +5405,9 @@ static int stmmac_napi_poll_tx(struct napi_struct *napi, int budget)
 		spin_unlock_irqrestore(&ch->lock, flags);
 	}
 
+	if (pending_packets)
+		stmmac_tx_timer_arm(priv, chan);
+
 	return work_done;
 }
 
@@ -5410,11 +5417,13 @@ static int stmmac_napi_poll_rxtx(struct napi_struct *napi, int budget)
 		container_of(napi, struct stmmac_channel, rxtx_napi);
 	struct stmmac_priv *priv = ch->priv_data;
 	int rx_done, tx_done, rxtx_done;
+	bool tx_pending_packets = false;
 	u32 chan = ch->index;
 
 	priv->xstats.napi_poll++;
 
-	tx_done = stmmac_tx_clean(priv, budget, chan);
+	tx_done = stmmac_tx_clean(priv, budget, chan, &tx_pending_packets);
+	//tx_done = stmmac_tx_clean(priv, budget, chan);
 	tx_done = min(tx_done, budget);
 
 	rx_done = stmmac_rx_zc(priv, budget, chan);
@@ -5438,6 +5447,9 @@ static int stmmac_napi_poll_rxtx(struct napi_struct *napi, int budget)
 		stmmac_enable_dma_irq(priv, priv->ioaddr, chan, 1, 1);
 		spin_unlock_irqrestore(&ch->lock, flags);
 	}
+
+	if (tx_pending_packets)
+		stmmac_tx_timer_arm(priv, chan);	
 
 	return min(rxtx_done, budget - 1);
 }
@@ -6813,9 +6825,9 @@ static int stmmac_hw_init(struct stmmac_priv *priv)
 static void stmmac_napi_add(struct net_device *dev)
 {
 	struct stmmac_priv *priv = netdev_priv(dev);
-	u32 queue, maxq;
+	u32 queue, maxq;	
 
-	maxq = max(priv->plat->rx_queues_to_use, priv->plat->tx_queues_to_use);
+	maxq = max(priv->plat->rx_queues_to_use, priv->plat->tx_queues_to_use);	
 
 	for (queue = 0; queue < maxq; queue++) {
 		struct stmmac_channel *ch = &priv->channel[queue];
@@ -6826,18 +6838,23 @@ static void stmmac_napi_add(struct net_device *dev)
 
 		if (queue < priv->plat->rx_queues_to_use) {
 			netif_napi_add(dev, &ch->rx_napi, stmmac_napi_poll_rx,
-				       NAPI_POLL_WEIGHT);
+		//		       NAPI_POLL_WEIGHT);
+						     8);
+				
+		      
 		}
 		if (queue < priv->plat->tx_queues_to_use) {
 			netif_tx_napi_add(dev, &ch->tx_napi,
 					  stmmac_napi_poll_tx,
-					  NAPI_POLL_WEIGHT);
+		//			  NAPI_POLL_WEIGHT);
+							1);
+									
 		}
 		if (queue < priv->plat->rx_queues_to_use &&
 		    queue < priv->plat->tx_queues_to_use) {
 			netif_napi_add(dev, &ch->rxtx_napi,
 				       stmmac_napi_poll_rxtx,
-				       NAPI_POLL_WEIGHT);
+				       NAPI_POLL_WEIGHT);		       			
 		}
 	}
 }
